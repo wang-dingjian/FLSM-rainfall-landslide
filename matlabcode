@@ -1,0 +1,336 @@
+clear; clc;
+
+%% 参数初始化
+fprintf('开始降雨诱发滑坡局部稳定性分析...\n');
+
+% 读取滑坡几何数据
+X = xlsread('D:\文件\强降雨作用下破坏概率演化\案例\龙家台滑坡\龙家台.xlsx', 'A2:L41');
+
+% 蒙特卡洛模拟参数
+m1 = 10000;  % 样本数量
+n = 40;     % 切片数量
+
+% 降雨参数
+q = 4/3600/1000;  % 降雨强度 (m/s)
+t = 100*3600;         % 降雨持续时间 (s)
+
+% 材料参数统计特征
+theta_delta_mean = 0.19;
+theta_delta_std = 0.0019;
+phi_mean =-1.260251661;
+phi_std =0.079872442;
+c_mean =2.392920107;
+c_std = 0.099751345;
+s_mean = 4.78744174528188;
+s_std = 0.00999975001354021;
+psai_mean = -0.223193548814376;
+psai_std = 0.00999975001354021;
+Ks_mean = -13.94048143;
+Ks_std = 0.1980422004 ;
+
+% 生成随机参数样本
+theta_delta = normrnd(theta_delta_mean, theta_delta_std, m1, n);
+phi = lognrnd(phi_mean, phi_std, m1, n);
+c = lognrnd(c_mean, c_std, m1, n);
+s = lognrnd(s_mean, s_std, m1, n);
+psai = lognrnd(psai_mean, psai_std, m1, n);
+Ks = lognrnd(Ks_mean, Ks_std, m1, n);
+Ks = lognrnd(Ks_mean, Ks_std, m1, n);
+Ks = lognrnd(Ks_mean, Ks_std, m1, n);
+Ks = lognrnd(Ks_mean, Ks_std, m1, n);
+Ks = lognrnd(Ks_mean, Ks_std, m1, n);
+gama_s = normrnd(gama_s_mean, gama_s_std, m1, n);    % 饱和重度 (kN/m³)
+gama_a = normrnd(gama_a_mean, gama_a_std, m1, n);    % 天然重度 (kN/m³)
+phi_b = normrnd(phi_b_mean, phi_b, m1, n);  % 基质吸力摩擦角 (弧度)
+gama_w = 10;      % 水重度 (kN/m³)
+
+%% 计算几何参数
+fprintf('计算滑坡几何参数...\n');
+
+H = zeros(1, n);      % 切片高度
+h = zeros(1, n);      % 地下水位高度
+l = zeros(1, n);      % 滑面长度
+alpha = zeros(1, n);  % 滑面倾角
+beta = zeros(1, n);   % 坡面倾角
+
+for j = 1:n
+    H(j) = X(j, 2) - X(j, 8);
+    h(j) = X(j, 10) - X(j, 8);
+    l(j) = sqrt((X(j, 7) - X(j, 5))^2 + (X(j, 8) - X(j, 6))^2);
+    
+    % 计算滑面倾角 (避免除零)
+    dx_alpha = X(j, 5) - X(j, 7);
+    if abs(dx_alpha) > 1e-10
+        alpha(j) = atan((X(j, 6) - X(j, 8)) / dx_alpha);
+    else
+        alpha(j) = sign(X(j, 6) - X(j, 8)) * pi/2;
+    end
+    
+    % 计算坡面倾角 (避免除零)
+    dx_beta = X(j, 3) - X(j, 1);
+    if abs(dx_beta) > 1e-10
+        beta(j) = atan((X(j, 4) - X(j, 2)) / dx_beta);
+    else
+        beta(j) = sign(X(j, 4) - X(j, 2)) * pi/2;
+    end
+end
+
+% 边界条件
+alpha = [alpha, 0];  % 扩展边界
+h = [h, 0];
+H = [H, 0];
+
+%% 预分配结果数组
+fprintf('预分配内存...\n');
+
+z_p = zeros(m1, n);      % 临界湿润锋深度
+t_p = zeros(m1, n);      % 临界时间
+z_f = zeros(m1, n);      % 湿润锋深度
+eta = zeros(m1, n);      % 饱和度
+c_psai = zeros(m1, n);   % 等效粘聚力
+FLSM = zeros(m1, n);     % 局部安全储备系数
+
+%% 主计算循环
+fprintf('开始主计算循环 (%d 样本)...\n', m1);
+
+for i = 1:m1
+    if mod(i, 100) == 0
+        fprintf('  处理样本 %d/%d\n', i, m1);
+    end
+    
+    % 预计算每个切片的推力和几何参数
+    El = zeros(1, n+1);  % 左推力
+    Eu = zeros(1, n+1);  % 右推力
+    G = zeros(1, n);     % 重力
+    P = zeros(1, n);     % 地下水渗透力
+    Q = zeros(1, n);     % 入渗区渗透力
+    lama = zeros(1, n);  % λ参数
+    epsi = zeros(1, n);  % ε参数
+    kapa = zeros(1, n);  % κ参数
+    
+    for j = 1:n
+        %% 1. 计算湿润锋深度 (使用数值方法替代符号计算)
+        denominator = (q / Ks(i,j) - 1);
+        if denominator <= 1e-10
+            z_p(i,j) = 0.1;
+            t_p(i,j) = 1e10;  % 很大的值，确保 t < t_p
+        else
+            z_p(i,j) = psai(i,j) / denominator / cos(beta(j));
+            t_p(i,j) = psai(i,j) * theta_delta(i,j) / (q * denominator * (cos(beta(j)))^2);
+        end
+        
+        if t < t_p(i,j)
+            % 阶段1：降雨全部入渗
+            z_f(i,j) = q * cos(beta(j)) * t / theta_delta(i,j);
+        else
+            % 阶段2：使用数值方法求解
+            % 定义目标函数
+            func = @(z) theta_delta(i,j)/(Ks(i,j)*cos(beta(j))) * ...
+                        (z - z_p(i,j) - psai(i,j)/cos(beta(j))*log((z*cos(beta(j))+psai(i,j))/(z_p(i,j)*cos(beta(j))+psai(i,j)))) + ...
+                        t_p(i,j) - t;
+            
+            % 设置搜索区间
+            z_min = z_p(i,j) + 0.01;
+            z_max = 50;  % 最大搜索深度
+            
+            % 二分法求解
+            tolerance = 1e-6;
+            max_iter = 50;
+            
+            for iter = 1:max_iter
+                z_mid = (z_min + z_max) / 2;
+                f_mid = func(z_mid);
+                
+                if abs(f_mid) < tolerance
+                    z_f(i,j) = z_mid;
+                    break;
+                end
+                
+                if func(z_min) * f_mid < 0
+                    z_max = z_mid;
+                else
+                    z_min = z_mid;
+                end
+                
+                % 如果达到最大迭代次数，使用最后的中点值
+                if iter == max_iter
+                    z_f(i,j) = (z_min + z_max) / 2;
+                end
+            end
+        end
+        
+        % 确保湿润锋深度在合理范围内
+        z_f(i,j) = max(0, min(z_f(i,j), 0.5*(X(j,2)-X(j,10)+X(j,4)-X(j,12))));
+        
+        %% 2. 计算饱和度
+        if j > 1 && j < n
+            eta(i,j) = min((z_f(i,j)/cos(beta(j)) + 0.5*(h(j)+h(j+1))) / (0.5*(H(j)+H(j+1))), 1);
+        elseif j == 1
+            eta(i,j) = min(1 - (1 - z_f(i,j)/cos(beta(j))/H(j+1))^2 + h(j+1)/H(j+1), 1);
+        else
+            eta(i,j) = min(1 - (1 - z_f(i,j)/cos(beta(j))/H(j))^2 + h(j)/H(j), 1);
+        end
+        
+        %% 3. 计算等效粘聚力 (Montrasio & Valentino 模型)
+        c_psai(i,j) = c(i,j) + s(i,j) * tan(phi_b) * (1 - eta(i,j))^3.4;
+        
+        %% 4. 计算力系
+        % 重力 (考虑饱和区和非饱和区)
+        saturated_height = 2 * z_f(i,j) / cos(beta(j)) + h(j) + h(j+1);
+        G(j) = 0.5 * (gama_s - gama_w) * saturated_height * l(j) * cos(alpha(j)) + ...
+               0.5 * gama_a * (H(j) + H(j+1) - saturated_height) * l(j) * cos(alpha(j));
+        
+        % 地下水渗透力
+        P(j) = 0.5 * gama_w * l(j) * (h(j) + h(j+1)) * sin(alpha(j)) * cos(alpha(j));
+        
+        % 入渗区渗透力
+        Q(j) = gama_w * l(j) * z_f(i,j) * tan(beta(j)) * sin(alpha(j));
+        
+        %% 5. 计算推力参数
+        lama(j) = cos(alpha(j) - alpha(j+1)) - sin(alpha(j) - alpha(j+1)) * tan(phi(i,j));
+        epsi(j) = cos(alpha(j)) * tan(phi(i,j)) - sin(alpha(j));
+        kapa(j) = cos(alpha(j) - beta(j)) + sin(alpha(j) - beta(j)) * tan(phi(i,j));
+    end
+    
+    %% 6. 计算推力 (从左到右)
+    for k = 2:n
+        El(k) = 1/lama(k-1) * (El(k-1) + epsi(k-1)*G(k-1) - kapa(k-1)*Q(k-1) - P(k-1) + c_psai(i,k-1)*l(k-1));
+        El(k) = max(El(k), 0);  % 推力不能为负
+    end
+    
+    %% 7. 计算推力 (从右到左)
+    for k = (n-1):-1:1
+        Eu(k+1) = lama(k+1) * Eu(k+2) - epsi(k+1)*G(k+1) + kapa(k+1)*Q(k+1) + P(k+1) - c_psai(i,k+1)*l(k+1);
+        Eu(k+1) = max(Eu(k+1), 0);  % 推力不能为负
+    end
+    
+    %% 8. 计算FLSM
+    for j = 1:n
+        % 滑动力
+        driving_force = Eu(j+1) * cos(alpha(j) - alpha(j+1))+ G(j) * sin(alpha(j)) + P(j) + Q(j) * cos(alpha(j) - beta(j))+ Eu(j+1) * sin(alpha(j) - alpha(j+1)) * tan(phi(i,j))  + Q(j) * sin(alpha(j) - beta(j))* tan(phi(i,j)) ;
+                       
+        
+        % 抗滑力
+        resisting_force = (G(j) * cos(alpha(j)) ) * tan(phi(i,j)) + c_psai(i,j) * l(j)  +  El(j) ;
+                         
+        
+        % 局部安全储备系数
+        if resisting_force > 0
+            FLSM(i,j) = (resisting_force - driving_force) / resisting_force;
+        else
+            FLSM(i,j) = -1;  % 完全不稳定
+        end
+    end
+end
+
+%% 结果分析和可视化
+fprintf('分析完成，生成结果图表...\n');
+
+% 计算统计量
+FLSM_mean = mean(FLSM, 1);
+FLSM_std = std(FLSM, 0, 1);
+failure_prob = sum(FLSM < 0, 1) / m1;
+
+% 1. FLSM沿剖面分布
+figure('Position', [100, 100, 1200, 800]);
+subplot(2,3,1);
+errorbar(1:n, FLSM_mean, FLSM_std, 'o-', 'LineWidth', 1.5, 'MarkerSize', 4);
+xlabel('切片编号');
+ylabel('FLSM');
+title('(a) FLSM沿滑坡剖面分布');
+grid on;
+yline(0, 'r--', 'LineWidth', 2, 'Label', '稳定界限');
+
+
+%计算概率密度和累计分布
+
+target_columns = [2, 10, 18, 21, 29, 39];
+num_points = 100; % 定义每个列的数据点数
+
+% 创建图形窗口
+figure('Position', [100, 100, 1200, 800]);
+
+% 预分配矩阵来存储每个列的PDF和CDF数据
+pdf_matrix = zeros(num_points, length(target_columns));
+cdf_matrix = zeros(num_points, length(target_columns));
+xi_matrix = zeros(num_points, length(target_columns));
+cdf_x_matrix = zeros(num_points, length(target_columns));
+
+% 对每个目标列进行计算和绘图
+for i = 1:length(target_columns)
+    col = target_columns(i);
+    
+    % 提取当前列的数据
+    data = FLSM(:, col);
+    
+    % 子图位置
+    subplot(2, 3, i);
+    
+    % 计算概率密度函数(PDF) - 使用核密度估计
+    [f, xi] = ksdensity(data, 'NumPoints', num_points);
+    
+    % 计算累积分布函数(CDF) - 使用经验分布函数
+    [cdf_values, cdf_x] = ecdf(data);
+    
+    % 确保CDF数据是有效的
+    if length(cdf_x) < 2
+        % 如果数据点太少，使用简单的线性CDF
+        cdf_x_interp = linspace(min(data), max(data), num_points);
+        cdf_values_interp = (cdf_x_interp - min(data)) / (max(data) - min(data));
+    else
+        % 确保cdf_x是严格递增的，避免插值问题
+        [cdf_x_unique, idx] = unique(cdf_x);
+        cdf_values_unique = cdf_values(idx);
+        
+        % 创建插值点
+        cdf_x_interp = linspace(min(cdf_x_unique), max(cdf_x_unique), num_points);
+        
+        % 使用更稳健的插值方法
+        if length(cdf_x_unique) > 1
+            cdf_values_interp = interp1(cdf_x_unique, cdf_values_unique, cdf_x_interp, 'linear', 'extrap');
+        else
+            % 如果只有一个点，使用简单线性
+            cdf_values_interp = linspace(0, 1, num_points);
+        end
+    end
+    
+    % 确保CDF值在[0,1]范围内
+    cdf_values_interp = max(0, min(1, cdf_values_interp));
+    
+    % 保存数据到矩阵
+    pdf_matrix(:, i) = f;
+    cdf_matrix(:, i) = cdf_values_interp;
+    xi_matrix(:, i) = xi;
+    cdf_x_matrix(:, i) = cdf_x_interp;
+    
+    % 绘制PDF和CDF
+    yyaxis left;
+    plot(xi, f, 'b-', 'LineWidth', 2);
+    ylabel('概率密度函数 (PDF)');
+    ylim([0, max(f)*1.1]);
+    
+    yyaxis right;
+    plot(cdf_x_interp, cdf_values_interp, 'r-', 'LineWidth', 2);
+    ylabel('累积分布函数 (CDF)');
+    ylim([0, 1.05]);
+    
+    title(sprintf('第 %d 列的PDF和CDF', col));
+    xlabel('数值');
+    grid on;
+    legend('PDF', 'CDF', 'Location', 'best');
+end
+
+
+%计算分位值
+quantiles = [0.01, 0.25, 0.5, 0.75, 0.99];
+num_quantiles = length(quantiles);
+num_columns = size(FLSM, 2);
+
+% 创建分位值矩阵 (5行 × 40列)
+quantile_matrix = zeros(num_quantiles, num_columns);
+
+% 计算每列的分位值
+for col = 1:num_columns
+    data = FLSM(:, col);
+    quantile_matrix(:, col) = quantile(data, quantiles);
+end
